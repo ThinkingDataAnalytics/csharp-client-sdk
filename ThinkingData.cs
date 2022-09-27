@@ -23,7 +23,7 @@ namespace ThinkingData.Analytics
     public static class TACommon
     {  
         private static string libName = "CSharp";
-        private static string libVersion = "1.0.0";
+        private static string libVersion = "1.1.0";
         private static TALogging logType = TALogging.TALoggingLog;
 
         public static string LibName
@@ -396,19 +396,19 @@ namespace ThinkingData.Analytics
             _distinct_id = token;
         }
 
-        public void login(string token)
+        public void Login(string token)
         {
             updateIdentityId(filePathAccountId(), token);
             _account_id = token;
         }
         
-        public void logout()
+        public void Logout()
         {
             updateIdentityId(filePathAccountId(), "");
             _account_id = "";
         }
 
-        public string getDeviceId()
+        public string GetDeviceId()
         {
             return readIdentityId(filePathDeviceId());
         }
@@ -712,7 +712,7 @@ namespace ThinkingData.Analytics
                 if (KeyPattern.IsMatch(key))
                 {
                     if (!IsNumber(value) && !(value is string) && !(value is DateTime) && !(value is bool) &&
-                        !(value is IList))
+                        !(value is IList) && !(value is IDictionary))
                     {
                         throw new ArgumentException(
                             "The supported data type including: Number, String, Date, Boolean,List. Invalid property: {key}");
