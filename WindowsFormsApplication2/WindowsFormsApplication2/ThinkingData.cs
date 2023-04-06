@@ -1,7 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System;
 using System.IO;
 using System.Net;
 using Newtonsoft.Json;
@@ -9,9 +9,9 @@ using System.IO.Compression;
 using Newtonsoft.Json.Converters;
 using System.Collections;
 using System.Text.RegularExpressions;
-using System.Windows.Forms;
-
-
+using System.Threading.Tasks;
+using System.Threading;
+using System.Diagnostics;
 
 namespace ThinkingData.Analytics
 {
@@ -23,7 +23,7 @@ namespace ThinkingData.Analytics
     public static class TACommon
     {  
         private static string libName = "CSharp";
-        private static string libVersion = "1.1.0";
+        private static string libVersion = "1.2.0";
         private static TALogging logType = TALogging.TALoggingLog;
 
         public static string LibName
@@ -39,68 +39,32 @@ namespace ThinkingData.Analytics
             set { logType = value;  }
         }
     }
-
-    public interface IConsumer
-    {
-        void Send(Dictionary<string, object> message);
-
-        void Flush();
-
-        void Close();
-    }
-
     
-    public class BatchConsumer : IConsumer
+    public class HttpSender
     {
         private const int MaxFlushBatchSize = 20;
         private const int DefaultTimeOutSecond = 30;
-
-        private readonly List<Dictionary<string, object>> _messageList;
-
-        private readonly IsoDateTimeConverter _timeConverter = new IsoDateTimeConverter
-        {
-            DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff"
-        };
 
         private readonly string _url;
         private readonly string _appId;
         private readonly int _batchSize;
         private readonly int _requestTimeoutMillisecond;
         private readonly bool _throwException;
-        private readonly bool _compress;
+        private readonly List<Dictionary<string, object>> _messageList;
 
-        public BatchConsumer(string serverUrl, string appId) : this(serverUrl, appId, MaxFlushBatchSize,
-            DefaultTimeOutSecond, false, true)
+        private readonly IsoDateTimeConverter _timeConverter = new IsoDateTimeConverter {  DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff"};
+
+       
+        static bool isNetworking = false;
+        static Mutex ta_networking_mutex = new Mutex();
+
+        public HttpSender(string serverUrl, string appId) : this(serverUrl, appId, MaxFlushBatchSize,
+            DefaultTimeOutSecond, false)
         {
         }
 
-        /**
-         * 数据是否需要压缩，compress 内网可设置 false
-         */
-        public BatchConsumer(string serverUrl, string appId, bool compress) : this(serverUrl, appId, MaxFlushBatchSize,
-            DefaultTimeOutSecond, false, compress)
-        {
-        }
-
-        /**
-         * batchSize 每次flush到TA的数据条数，默认20条
-         */
-        public BatchConsumer(string serverUrl, string appId, int batchSize) : this(serverUrl, appId, batchSize,
-            DefaultTimeOutSecond)
-        {
-        }
-
-        /**
-         * batchSize 每次flush到TA的数据条数，默认20条
-         * requestTimeoutSecond 发送服务器请求时间设置，默认30s
-         */
-        public BatchConsumer(string serverUrl, string appId, int batchSize, int requestTimeoutSecond) : this(serverUrl,
-            appId, batchSize, requestTimeoutSecond, false)
-        {
-        }
-
-        public BatchConsumer(string serverUrl, string appId, int batchSize, int requestTimeoutSecond,
-            bool throwException, bool compress = true)
+        public HttpSender(string serverUrl, string appId, int batchSize, int requestTimeoutSecond,
+            bool throwException)
         {
             _messageList = new List<Dictionary<string, object>>();
             var relativeUri = new Uri("/sync", UriKind.Relative);
@@ -108,8 +72,7 @@ namespace ThinkingData.Analytics
             this._appId = appId;
             this._batchSize = Math.Min(MaxFlushBatchSize, batchSize);
             this._throwException = throwException;
-            this._compress = compress;
-            this._requestTimeoutMillisecond = requestTimeoutSecond * 1000;
+            this._requestTimeoutMillisecond = 3 * 1000;
         }
 
         public void Send(Dictionary<string, object> message)
@@ -117,27 +80,51 @@ namespace ThinkingData.Analytics
             lock (_messageList)
             {
                 _messageList.Add(message);
-                if (_messageList.Count >= _batchSize)
-                {
-                    Flush();
-                }
+                _Flush();
             }
         }
 
-        public void Flush()
-        {
-            lock (_messageList)
+
+        public async Task<bool> _Flush() {
+
+            await Task.Run(async () =>
             {
-                while (_messageList.Count != 0)
+                ta_networking_mutex.WaitOne();
+                if (isNetworking)
                 {
-                    var batchRecordCount = Math.Min(_batchSize, _messageList.Count);
-                    var batchList = _messageList.GetRange(0, batchRecordCount);
+                    ta_networking_mutex.ReleaseMutex();
+                    return ;
+                }
+                isNetworking = true;
+                ta_networking_mutex.ReleaseMutex();
+
+                Int64 messageCount;
+                lock (_messageList)
+                {
+                    messageCount = _messageList.Count;
+                }
+
+                while (messageCount > 0)
+                {
+                    List<Dictionary<string, object>> batchList = new List<Dictionary<string, object>> { };
+                    try
+                    {
+                        batchList.Add(_messageList[0]);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] Failed to get batchList.", ex);
+                        }
+                        continue;
+                    }
 
                     var finalDic = new Dictionary<string, object>();
                     finalDic.Add("#app_id", this._appId);
                     finalDic.Add("data", batchList);
 
-
+                    // Serialize
                     string sendingData;
                     try
                     {
@@ -145,40 +132,76 @@ namespace ThinkingData.Analytics
                     }
                     catch (Exception exception)
                     {
-                        _messageList.RemoveRange(0, batchRecordCount);
-                        if (_throwException)
+                        try
                         {
-                            throw new SystemException("Failed to serialize data.", exception);
+                            if (_messageList.Count > 0)
+                            {
+                                _messageList.RemoveAt(0);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (_throwException)
+                            {
+                                throw new SystemException("[ThinkingEngine] Failed to remove first message.", ex);
+                            }
+                            continue;
                         }
 
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] Failed to serialize data.", exception);
+                        }
                         continue;
                     }
 
-                    try
+                    var result = await SendToServer(sendingData, batchList.Count);
+                    if (result)
                     {
                         if (TACommon.LogType == TALogging.TALoggingLog)
                         {
-                            Console.WriteLine("flush datas:");
+                            Console.WriteLine("[ThinkingEngine] flush success:");
                             Console.WriteLine(sendingData);
                         }
-                        SendToServer(sendingData, batchList.Count);
-                        _messageList.RemoveRange(0, batchRecordCount);
-                    }
-                    catch (Exception exception)
-                    {
-                        if (_throwException)
-                        {
-                            throw new SystemException("Failed to send message with BatchConsumer.", exception);
-                        }
 
-                        return;
+                        try
+                        {
+                            if (_messageList.Count > 0)
+                            {
+                                _messageList.RemoveAt(0);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (_throwException)
+                            {
+                                throw new SystemException("[ThinkingEngine] Failed to remove first message.", ex);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        ta_networking_mutex.WaitOne();
+                        isNetworking = false;
+                        ta_networking_mutex.ReleaseMutex();
+                        break;
+                    }
+                    lock (_messageList)
+                    {
+                        messageCount = _messageList.Count;
                     }
                 }
-            }
+                ta_networking_mutex.WaitOne();
+                isNetworking = false;
+                ta_networking_mutex.ReleaseMutex();
+            });
+            
+            return true;
         }
 
-        private void SendToServer(string dataStr, int batchCount)
+        private async Task<bool> SendToServer(string dataStr, int batchCount)
         {
+            bool sendSuccess = false;
             try
             {
                 var dataCompressed = Gzip(dataStr);
@@ -196,20 +219,22 @@ namespace ThinkingData.Analytics
                 request.Headers.Add("TA-Integration-Extra", TACommon.LibName);
                 request.Headers.Add("TA-Integration-Count", batchCount.ToString());
 
-                using (var stream = request.GetRequestStream())
+                using (var stream = await request.GetRequestStreamAsync())
                 {
                     stream.Write(dataBody, 0, dataBody.Length);
                     stream.Flush();
                 }
 
-                var response = (HttpWebResponse)request.GetResponse();
+                var response = await request.GetResponseAsync() as HttpWebResponse;
 
                 var responseString = new StreamReader(response.GetResponseStream()).ReadToEnd();
 
-
                 if (response.StatusCode != HttpStatusCode.OK)
                 {
-                    throw new SystemException("C# SDK send response is not 200, content: " + responseString);
+                    if (_throwException)
+                    {
+                        throw new SystemException("[ThinkingEngine] error msg: send response is not 200, content: " + responseString);
+                    }
                 }
 
                 response.Close();
@@ -221,36 +246,56 @@ namespace ThinkingData.Analytics
                 {
                     if (code == -1)
                     {
-                        throw new SystemException("error msg:" +
-                                                  (resultJson.ContainsKey("msg")
-                                                      ? resultJson["msg"]
-                                                      : "invalid data format"));
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] error msg:" +
+                                                    (resultJson.ContainsKey("msg")
+                                                        ? resultJson["msg"]
+                                                        : "invalid data format"));
+                        }
                     }
                     else if (code == -2)
                     {
-                        throw new SystemException("error msg:" +
-                                                  (resultJson.ContainsKey("msg")
-                                                      ? resultJson["msg"]
-                                                      : "APP ID doesn't exist"));
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] error msg:" +
+                                                    (resultJson.ContainsKey("msg")
+                                                        ? resultJson["msg"]
+                                                        : "APP ID doesn't exist"));
+                        }
                     }
                     else if (code == -3)
                     {
-                        throw new SystemException("error msg:" +
-                                                  (resultJson.ContainsKey("msg")
-                                                      ? resultJson["msg"]
-                                                      : "invalid ip transmission"));
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] error msg:" +
+                                                    (resultJson.ContainsKey("msg")
+                                                        ? resultJson["msg"]
+                                                        : "invalid ip transmission"));
+                        }
                     }
                     else
                     {
-                        throw new SystemException("Unexpected response return code: " + code);
+                        if (_throwException)
+                        {
+                            throw new SystemException("[ThinkingEngine] Unexpected response return code: " + code);
+                        }
                     }
                 }
+                else
+                {
+                    sendSuccess = true;
+                }
             }
-            catch (Exception e)
+            catch (Exception)
             {
-                Console.WriteLine(e + "\n  Cannot post message to " + _url);
-                throw;
+                if (_throwException)
+                {
+                    throw new SystemException("[ThinkingEngine] Unexpected sendToServer error ");
+                }
             }
+            
+            return sendSuccess;
         }
 
         private static byte[] Gzip(string inputStr)
@@ -263,350 +308,389 @@ namespace ThinkingData.Analytics
                 return outputStream.ToArray();
             }
         }
-
-        public void Close()
-        {
-            Flush();
-        }
     }
 
-    
     public delegate Dictionary<string, object> TADynamicPropertyAction();
 
     public class ThinkingdataAnalytics
     {
-        private string _appid;
-        private string _serverurl;
-
-        private string _device_id;
-        private string _account_id;
-        private string _distinct_id;
-
+        private string _appId;
+        private string _serverUrl;
+        private string _deviceId;
+        private string _accountId;
+        private string _distinctId;
         private readonly Dictionary<string, object> _pubicProperties;
+        private readonly HttpSender _httpSender;
+
+        static Mutex _taIdMutex = new Mutex();
+        static Mutex _taSuperPropertyMutex = new Mutex();
 
         public TADynamicPropertyAction dynamicPropertyAction;
 
         private static readonly Regex KeyPattern =
             new Regex("^(#[a-z][a-z0-9_]{0,49})|([a-z][a-z0-9_]{0,50})$", RegexOptions.IgnoreCase);
 
-        private readonly IConsumer _consumer;
-
-        
         public static void setLoggingType(TALogging type)
         {
             TACommon.LogType = type;
         }
 
-
-        /*
-         * 实例化tga类，接收一个Consumer的一个实例化对象
-         * @param consumer	BatchConsumer,LoggerConsumer实例
-        */
+        /**
+         * After the SDK initialization is complete, the saved instance can be obtained through this api
+         *
+         * @return SDK instance
+         */
         public ThinkingdataAnalytics(string appid, string url)
         {
-            this._consumer = new BatchConsumer(url, appid);
+            // init httpSender
+            this._httpSender = new HttpSender(url, appid);
 
+            // throw appid and url are null 
             if (string.IsNullOrEmpty(appid))
             {
-                throw new SystemException("The appid must be provided.");
+                throw new SystemException("[ThinkingEngine] The appid must be provided.");
             }
 
             if (string.IsNullOrEmpty(url))
             {
-                throw new SystemException("The url must be provided.");
+                throw new SystemException("[ThinkingEngine] The url must be provided.");
             }
 
-            _appid = appid;
-            _serverurl = url;
+            _appId = appid;
+            _serverUrl = url;
 
-            // 1.还原 deviceID 
-            _device_id = readIdentityId(filePathDeviceId());
-            if (string.IsNullOrEmpty(_device_id) )
+            // get deviceid
+            _taIdMutex.WaitOne();
+            _deviceId = readIdentityId(filePathDeviceId());
+            if (string.IsNullOrEmpty(_deviceId) )
             {
-                _device_id = Guid.NewGuid().ToString();
-                updateIdentityId(filePathDeviceId(), _device_id);
+                _deviceId = Guid.NewGuid().ToString();
+                updateIdentityId(filePathDeviceId(), _deviceId);
             }
+            _taIdMutex.ReleaseMutex();
 
-
-            // 2. 还原distinctID
-            _distinct_id = readIdentityId(filePathDistinctId());
-            if (string.IsNullOrEmpty(_distinct_id))
+            // get distinctid
+            _taIdMutex.WaitOne();
+            _distinctId = readIdentityId(filePathDistinctId());
+            if (string.IsNullOrEmpty(_distinctId))
             {
-                _distinct_id = _device_id;
-                updateIdentityId(filePathDistinctId(), _distinct_id);
+                _distinctId = _deviceId;
+                updateIdentityId(filePathDistinctId(), _distinctId);
             }
+            _taIdMutex.ReleaseMutex();
 
-
-            // 3. 还原accountID
-            _account_id = readIdentityId(filePathAccountId());
-            if (string.IsNullOrEmpty(_account_id))
+            // get accountid
+            _taIdMutex.WaitOne();
+            _accountId = readIdentityId(filePathAccountId());
+            if (string.IsNullOrEmpty(_accountId))
             {
-                _account_id = "";
-                updateIdentityId(filePathAccountId(), _account_id);
+                _accountId = "";
+                updateIdentityId(filePathAccountId(), _accountId);
             }
+            _taIdMutex.ReleaseMutex();
 
-            // 4. 公告属性
-            _pubicProperties = readsuperProperty(filePathSuperProperty());
+            // get superproperty
+            _taSuperPropertyMutex.WaitOne();
+            _pubicProperties = readSuperProperty(filePathSuperProperty());
+            if (_pubicProperties == null) {
+                _pubicProperties = new Dictionary<string, object>();
+            }
+            _taSuperPropertyMutex.ReleaseMutex();
 
+            if (TACommon.LogType == TALogging.TALoggingLog)
+            {
+                Console.WriteLine("Thinking Analytics "+ TACommon.LibVersion + " "+ TACommon.LibName + " SDK initialized successfully." + "  app id:" + appid + ",  server url:" + url);
+            }
         }
 
-
-        
-
-        /*
-        * 公共属性只用于track接口，其他接口无效，且每次都会自动向track事件中添加公共属性
-        * @param properties	公共属性
+        /**
+        * Set the public event attribute, which will be included in every event uploaded after that. The public event properties are saved without setting them each time.
+        *
+        * @param properties public event attribute
         */
         public void SetPublicProperties(Dictionary<string, object> properties)
         {
-            lock (_pubicProperties)
+            if (properties == null || properties.Keys.Count == 0)
             {
-                if (properties == null || properties.Keys.Count == 0)
+                ClearPublicProperties();
+            }
+            else if (properties.Keys.Count > 0)
+            {
+                _taSuperPropertyMutex.WaitOne();
+                foreach (var kvp in properties)
                 {
-                    ClearPublicProperties();
-                    _pubicProperties.Clear();
+                    _pubicProperties[kvp.Key] = kvp.Value;
                 }
-                else if (properties.Keys.Count > 0)
-                {
-                    foreach (var kvp in properties)
-                    {
-                        _pubicProperties[kvp.Key] = kvp.Value;
-                    }
-                    updateSuperProperty(filePathSuperProperty(), _pubicProperties);
-                }
-
+                updateSuperProperty(filePathSuperProperty(), _pubicProperties);
+                _taSuperPropertyMutex.ReleaseMutex();
             }
         }
 
-        /*
-	     * 清理掉公共属性，之后track属性将不会再加入公共属性
-	     */
+        /**
+           *  Clear all public event attributes.
+           */
         public void ClearPublicProperties()
         {
-            lock (_pubicProperties)
-            {
-                _pubicProperties.Clear();
-                updateSuperProperty(filePathSuperProperty(), _pubicProperties);
-            }
+            _taSuperPropertyMutex.WaitOne();
+            _pubicProperties.Clear();
+            updateSuperProperty(filePathSuperProperty(), _pubicProperties);
+            _taSuperPropertyMutex.ReleaseMutex();
         }
 
+        /**
+         * Set the distinct ID to replace the default UUID distinct ID.
+         *
+         * @param token distinct ID
+         */
         public void SetIdentity(string token)
         {
+            _taIdMutex.WaitOne();
             updateIdentityId(filePathDistinctId(), token);
-            _distinct_id = token;
+            _distinctId = token;
+            _taIdMutex.ReleaseMutex();
+
         }
 
+        /**
+         * Set the account ID. Each setting overrides the previous value. Login events will not be uploaded.
+         *
+         * @param token account ID
+         */
         public void Login(string token)
         {
+            _taIdMutex.WaitOne();
             updateIdentityId(filePathAccountId(), token);
-            _account_id = token;
+            _accountId = token;
+            _taIdMutex.ReleaseMutex();
+
         }
-        
+
+        /**
+         * Clearing the account ID will not upload user logout events.
+         */
         public void Logout()
         {
+            _taIdMutex.WaitOne();
             updateIdentityId(filePathAccountId(), "");
-            _account_id = "";
+            _accountId = "";
+            _taIdMutex.ReleaseMutex();
+
         }
+
 
         public string GetDeviceId()
         {
-            return readIdentityId(filePathDeviceId());
+            string deviceId = "";
+            _taIdMutex.WaitOne();
+            deviceId = readIdentityId(filePathDeviceId());
+            _taIdMutex.ReleaseMutex();
+            return deviceId;
         }
 
 
         private string filePathDeviceId()
         {
-            return Application.StartupPath + "\\_ta_deviceid_" + _appid + ".txt";
+            return Path.Combine(AppContext.BaseDirectory, "_ta_deviceid_" + _appId + ".txt"); 
         }
 
 
         private string filePathAccountId()
         {
-            return Application.StartupPath + "\\_ta_accountid_" + _appid + ".txt";
+            return Path.Combine(AppContext.BaseDirectory, "_ta_accountid_" + _appId + ".txt");
         }
 
 
         private string filePathDistinctId()
         {
-            return Application.StartupPath + "\\_ta_distinctid_" + _appid + ".txt";
+            return Path.Combine(AppContext.BaseDirectory, "_ta_distinctid_" + _appId + ".txt");
         }
 
         private string filePathSuperProperty()
         {
-            return Application.StartupPath + "\\_ta_superproperty_" + _appid + ".txt";
+            return Path.Combine(AppContext.BaseDirectory, "_ta_superproperty_" + _appId + ".txt");
         }
 
-        private void updateIdentityId(string path, string idid)
+        
+        private void updateIdentityId(string path, string identityId)
         {
-            File.WriteAllText(path, idid);
+            try {
+                File.WriteAllText(path, identityId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[ThinkingEngine] File WriteAllText Error");
+            }
+
         }
 
-       
-        private void updateSuperProperty(string path, Dictionary<string, object> idid)
+        private void updateSuperProperty(string path, Dictionary<string, object> property)
         {
-            string Contentjson = JsonConvert.SerializeObject(idid);
-            File.WriteAllText(path, Contentjson);
+            try
+            {
+                string Contentjson = JsonConvert.SerializeObject(property);
+                File.WriteAllText(path, Contentjson);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[ThinkingEngine] File WriteAllText Error");
+            }
         }
 
         private string readIdentityId(string path)
         {
-            
-            string idid = "";
-            
-            if (!System.IO.File.Exists(path))
+            string token = "";
+
+            try
             {
-                System.IO.File.WriteAllText(path, "");
-                return "";
+                if (!System.IO.File.Exists(path))
+                {
+                    System.IO.File.WriteAllText(path, "");
+                }
+                else
+                {
+                    token = File.ReadAllText(path);
+                }
+
+                if (string.IsNullOrEmpty(token))
+                {
+                    token = "";
+                }
             }
-            else
+            catch (Exception)
             {
-                idid = File.ReadAllText(path);
+                Console.WriteLine("[ThinkingEngine] File Read Token Error");
             }
-            if (idid == null)
-            {
-                idid = "";
-            }
-            return idid;
+            return token;
 
         }
 
         
-        private Dictionary<string, object> readsuperProperty(string path)
+        private Dictionary<string, object> readSuperProperty(string path)
         {
-            
             Dictionary<string, object> superDic = new Dictionary<string, object>();
-
-            if (!System.IO.File.Exists(path))
+            try
             {
-                System.IO.File.WriteAllText(path, "");
-                return superDic;
+                if (!System.IO.File.Exists(path))
+                {
+                    System.IO.File.WriteAllText(path, "");
+                }
+                else
+                {
+                    string superPropertyString = File.ReadAllText(path);
+                    superDic = JsonConvert.DeserializeObject<Dictionary<string, object>>(superPropertyString);
+                }
             }
-            else
+            catch (Exception)
             {
-
-                string idid = File.ReadAllText(path);
-               
-                Dictionary <string, object> DicContent = JsonConvert.DeserializeObject < Dictionary<string, object>> (idid);
-                return DicContent;
+                Console.WriteLine("[ThinkingEngine] File Read SuperProperty Error");
             }
-
-           
-
+            
+            return superDic;
         }
 
-
-        // 记录一个没有任何属性的事件
+        /**
+         * track a event
+         *
+         * @param event_name event name
+         */
         public void Track(string event_name)
         {
             _Add( "track", event_name, null, null, null);
         }
 
-        /*
-	    * 用户事件属性(注册)
-	    * @param	account_id	账号ID
-	    * @param	distinct_id	匿名ID
-	    * @param	event_name	事件名称
-	    * @param	properties	事件属性
-	    */
-        public void Track(string event_name,
-            Dictionary<string, object> properties)
+        /**
+         * track a event
+         *
+         * @param event_name event name
+         * @param properties event properties
+         */
+        public void Track(string event_name, Dictionary<string, object> properties)
         {
             if (string.IsNullOrEmpty(event_name))
             {
-                throw new SystemException("The event name must be provided.");
+                throw new SystemException("[ThinkingEngine] The event name must be provided.");
             }
-
             _Add( "track", event_name, null, null, properties);
         }
 
-        public void TrackFirst(string event_name, string first_check_id,
-            Dictionary<string, object> properties)
+        /**
+        * The first event refers to the ID of a device or other dimension, which will only be recorded once.
+        */
+        public void TrackFirst(string event_name, string first_check_id, Dictionary<string, object> properties)
         {
             if (string.IsNullOrEmpty(event_name))
             {
-                throw new SystemException("The event name must be provided.");
+                throw new SystemException("[ThinkingEngine] The event name must be provided.");
             }
 
             if (string.IsNullOrEmpty(first_check_id))
             {
-                throw new SystemException("The first check id must be provided.");
+                first_check_id = _deviceId;
             }
             
             _Add( "track", event_name, null, first_check_id, properties);
         }
 
+        /**
+        * The first event refers to the ID of a device or other dimension, which will only be recorded once.
+        */
+
         public void TrackFirst(string event_name, Dictionary<string, object> properties)
         {
-            TrackFirst(event_name, _device_id, properties);
+            TrackFirst(event_name, _deviceId, properties);
         }
 
-        
-
-        /*
-	    * 可更新事件属性
-	    * @param	account_id	账号ID
-	    * @param	distinct_id	匿名ID
-	    * @param	event_name	事件名称
-        * @param    event_id    事件ID
-	    * @param	properties	事件属性
-	    */
-        public void TrackUpdate(string event_name, string event_id,
-            Dictionary<string, object> properties)
+        /**
+        * You can implement the requirement to modify event data in a specific scenario through updatable events. Updatable events need to specify an ID that identifies the event and pass it in when the updatable event object is created.
+        */
+        public void TrackUpdate(string event_name, string event_id, Dictionary<string, object> properties)
         {
             if (string.IsNullOrEmpty(event_name))
             {
-                throw new SystemException("The event name must be provided.");
+                throw new SystemException("[ThinkingEngine] The event name must be provided.");
             }
 
             if (string.IsNullOrEmpty(event_id))
             {
-                throw new SystemException("The event id must be provided.");
+                throw new SystemException("[ThinkingEngine] The event id must be provided.");
             }
 
             _Add( "track_update", event_name, event_id, null, properties);
         }
 
-        /*
-	    * 可重写事件属性
-	    * @param	account_id	账号ID
-	    * @param	distinct_id	匿名ID
-	    * @param	event_name	事件名称
-        * @param    event_id    事件ID
-	    * @param	properties	事件属性
-	    */
-        public void TrackOverwrite(string event_name, string event_id,
-            Dictionary<string, object> properties)
+        /**
+         * Rewritable events will completely cover historical data with the latest data, which is equivalent to deleting the previous data and storing the latest data in effect. 
+        */
+        public void TrackOverwrite(string event_name, string event_id, Dictionary<string, object> properties)
         {
             if (string.IsNullOrEmpty(event_name))
             {
-                throw new SystemException("The event name must be provided.");
+                throw new SystemException("[ThinkingEngine] The event name must be provided.");
             }
 
             if (string.IsNullOrEmpty(event_id))
             {
-                throw new SystemException("The event id must be provided.");
+                throw new SystemException("[ThinkingEngine] The event id must be provided.");
             }
 
             _Add("track_overwrite", event_name, event_id, null, properties);
         }
 
-        /*
-         * 设置用户属性，如果已经存在，则覆盖，否则，新创建
-         * @param	account_id	账号ID
-         * @param	distinct_id	匿名ID
-         * @param	properties	增加的用户属性
-	     */
+        /**
+         * Sets the user property, replacing the original value with the new value if the property already exists.
+         *
+         * @param properties user property
+         */
         public void UserSet(Dictionary<string, object> properties)
         {
             _Add( "user_set", properties);
         }
 
-        /*
-        * 删除用户属性
-        * @param account_id 账号 ID
-        * @param distinct_id 访客 ID
-        * @param properties 用户属性
-        */
+        /**
+          * Reset user properties.
+          *
+          * @param properties user properties
+          */
         public void UserUnSet( List<string> properties)
         {
             var props = properties.ToDictionary<string, string, object>(property => property, property => 0);
@@ -614,38 +698,37 @@ namespace ThinkingData.Analytics
         }
 
         /**
-          * 设置用户属性，首次设置用户的属性,如果该属性已经存在,该操作为无效.
-          * @param	account_id	账号ID
-          * @param	distinct_id	匿名ID
-          * @param	properties	增加的用户属性
-         */
+          *  Sets a single user attribute, ignoring the new attribute value if the attribute already exists.
+          *
+          * @param properties user property
+          */
         public void UserSetOnce(Dictionary<string, object> properties)
         {
             _Add( "user_setOnce", properties);
         }
 
         /**
-          * 首次设置用户的属性。这个接口只能设置单个key对应的内容。
-          * @param	account_id	账号ID
-          * @param	distinct_id	匿名ID
-          * @param	properties	增加的用户属性
-         */
+        *  Sets a single user attribute, ignoring the new attribute value if the attribute already exists.
+        */
         public void UserSetOnce(string property, object value)
         {
             var properties = new Dictionary<string, object> { { property, value } };
             _Add( "user_setOnce", properties);
         }
 
-        /*
-          * 用户属性修改，只支持数字属性增加的接口
-          * @param	account_id	账号ID
-          * @param	distinct_id	匿名ID
-          * @param	properties	增加的用户属性
-         */
+        /**
+           * Adds the numeric type user attributes.
+           *
+           * @param properties user property
+           */
         public void UserAdd(Dictionary<string, object> properties)
         {
             _Add( "user_add", properties);
         }
+
+        /**
+           * Adds the numeric type user attributes.
+           */
 
         public void UserAdd(string property, long value)
         {
@@ -653,39 +736,33 @@ namespace ThinkingData.Analytics
             _Add( "user_add", properties);
         }
 
-        /*
-          * 追加用户的集合类型的一个或多个属性
-          * @param	account_id	账号ID
-          * @param	distinct_id	匿名ID
-          * @param	properties	增加的用户属性
-         */
+        /**
+       * Append a user attribute of the List type.
+       *
+       * @param properties user property
+       */
         public void UserAppend(Dictionary<string, object> properties)
         {
             _Add( "user_append", properties);
         }
 
         /**
-         * 用户删除,此操作不可逆
-         * @param 	account_id	账号ID
-         * @param	distinct_id	匿名ID
-        */
+           * Delete the user attributes,This operation is not reversible and should be performed with caution.
+           */
         public void UserDelete()
         {
             _Add( "user_del", new Dictionary<string, object>());
         }
 
-        /// 立即发送缓存中的所有日志
+        /**
+         * Empty the cache queue. When this api is called, the data in the current cache queue will attempt to be reported.
+         * If the report succeeds, local cache data will be deleted.
+         */
         public void Flush()
         {
-            _consumer.Flush();
+            _httpSender._Flush();
         }
-
-        //关闭并退出 sdk 所有线程，停止前会清空所有本地数据
-        public void Close()
-        {
-            _consumer.Close();
-        }
-
+    
         private static bool IsNumber(object value)
         {
             return (value is sbyte) || (value is short) || (value is int) || (value is long) || (value is byte)
@@ -711,22 +788,10 @@ namespace ThinkingData.Analytics
 
                 if (KeyPattern.IsMatch(key))
                 {
-                    if (!IsNumber(value) && !(value is string) && !(value is DateTime) && !(value is bool) &&
-                        !(value is IList) && !(value is IDictionary))
+                    if (!IsNumber(value) && !(value is string) && !(value is DateTime) && !(value is bool) && !(value is IList) && !(value is IDictionary))
                     {
-                        throw new ArgumentException(
-                            "The supported data type including: Number, String, Date, Boolean,List. Invalid property: {key}");
+                        throw new ArgumentException("The supported data type including: Number, String, Date, Boolean, List, IDictionary. Invalid property: {key}");
                     }
-
-                    // IList<object> list = value as List<object>;
-                    // if (list != null)
-                    //     for (var i = 0; i < list.Count; i++)
-                    //     {
-                    //         if (list[i] is DateTime)
-                    //         {
-                    //             list[i] = (DateTime.Now).ToString("yyyy-MM-dd HH:mm:ss.fff");
-                    //         }
-                    //     }
 
                     if (type == "user_add" && !IsNumber(value))
                     {
@@ -745,26 +810,29 @@ namespace ThinkingData.Analytics
             _Add( type, null, null, null, properties);
         }
 
-        private void _Add( string type, string event_name, string event_id,string first_check_id,
-            IDictionary<string, object> properties)
+        private void _Add( string type, string event_name, string event_id,string first_check_id, IDictionary<string, object> properties)
         {
             var evt = new Dictionary<string, object>();
-            if (!string.IsNullOrEmpty(_account_id))
+            if (!string.IsNullOrEmpty(_accountId))
             {
-                evt.Add("#account_id", _account_id);
+                evt.Add("#account_id", _accountId);
             }
 
-            if (!string.IsNullOrEmpty(_distinct_id))
+            if (!string.IsNullOrEmpty(_distinctId))
             {
-                evt.Add("#distinct_id", _distinct_id);
+                evt.Add("#distinct_id", _distinctId);
+            }
+            else {
+                evt.Add("#distinct_id", _deviceId);
             }
 
-            if (event_name != null)
+ 
+            if (!string.IsNullOrEmpty(event_name))
             {
                 evt.Add("#event_name", event_name);
             }
 
-            if (event_id != null)
+            if (!string.IsNullOrEmpty(event_id))
             {
                 if (type == "track_update" || type == "track_overwrite")
                 {
@@ -772,7 +840,7 @@ namespace ThinkingData.Analytics
                 }   
             }
 
-             if (!string.IsNullOrEmpty(first_check_id))
+            if (!string.IsNullOrEmpty(first_check_id))
             {
                 evt.Add("#first_check_id", first_check_id);
             }
@@ -780,17 +848,6 @@ namespace ThinkingData.Analytics
             evt.Add("#time", DateTime.Now);
             evt.Add("#type", type);
             evt.Add("#uuid", Guid.NewGuid().ToString("D"));
-
-            // if (properties != null)
-            // {
-            //     foreach (var kvp in properties)
-            //     {
-            //         if (kvp.Value is DateTime time)
-            //         {
-            //             eventProperties[kvp.Key] = time.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            //         }
-            //     }
-            // }
 
             if (properties == null)
             {
@@ -817,42 +874,50 @@ namespace ThinkingData.Analytics
                         }
                     }
 
-
-                if (_pubicProperties != null)
-                    lock (_pubicProperties)
+                _taSuperPropertyMutex.WaitOne();
+                if (_pubicProperties != null) {
+                    foreach (var kvp in _pubicProperties)
                     {
-                        foreach (var kvp in _pubicProperties)
+                        if (!eventProperties.ContainsKey(kvp.Key))
                         {
-                            if (!eventProperties.ContainsKey(kvp.Key))
-                            {
-                                eventProperties.Add(kvp.Key, kvp.Value);
-                            }
+                            eventProperties.Add(kvp.Key, kvp.Value);
                         }
                     }
-
-
-                if (_pubicProperties != null)
-                    lock (_pubicProperties)
-                    {
-                        foreach (var kvp in _pubicProperties)
-                        {
-                            if (!eventProperties.ContainsKey(kvp.Key))
-                            {
-                                eventProperties.Add(kvp.Key, kvp.Value);
-                            }
-                        }
-                    }
+                }
+                _taSuperPropertyMutex.ReleaseMutex();
 
                 eventProperties.Add("#lib_version", TACommon.LibVersion);
                 eventProperties.Add("#lib", TACommon.LibName);
-                eventProperties.Add("#os", "Windows");
-                eventProperties.Add("#device_id", _device_id);
+
+                if (Environment.OSVersion.Platform == System.PlatformID.Win32Windows) {
+                    eventProperties.Add("#os", "Windows");
+                } else if (Environment.OSVersion.Platform == System.PlatformID.Win32S) {
+                    eventProperties.Add("#os", "Windows");
+                } else if (Environment.OSVersion.Platform == System.PlatformID.Win32NT) {
+                    eventProperties.Add("#os", "Windows");
+                } else if (Environment.OSVersion.Platform == System.PlatformID.WinCE){
+                    eventProperties.Add("#os", "Windows");
+                } else if (Environment.OSVersion.Platform == System.PlatformID.MacOSX){
+                    eventProperties.Add("#os", "Mac");
+                }
+                eventProperties.Add("#device_id", _deviceId);
             }
+
             AssertProperties(type, eventProperties);
             
             evt.Add("properties", eventProperties);
 
-            _consumer.Send(evt);
+            if (TACommon.LogType == TALogging.TALoggingLog)
+            {
+                IsoDateTimeConverter _timeConverter = new IsoDateTimeConverter
+                {
+                    DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff"
+                };
+                Console.WriteLine("[ThinkingEngine] data queue:");
+                Console.WriteLine(JsonConvert.SerializeObject(evt, _timeConverter));
+            }
+
+            _httpSender.Send(evt);
         }
     }
 }

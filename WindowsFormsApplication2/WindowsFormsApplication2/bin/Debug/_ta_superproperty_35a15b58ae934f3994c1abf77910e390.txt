@@ -1,1 +1,0 @@
-{"super_id":12345,"super_create_date":"2019-07-08T20:23:22","super_group_no":"T22514","group_title":"【爆款拼装来袭super_】","super_group_purchase_id":438,"super_group_order_is_vip":3,"super_service_id":0,"super_json":{"key1":"value1"},"super_jsons":[{"key2":"value12"}]}
