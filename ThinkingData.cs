@@ -15,16 +15,17 @@ using System.Diagnostics;
 
 namespace ThinkingData.Analytics
 {
-    public enum TALogging {
+    public enum TALogging
+    {
         TALoggingNone,
         TALoggingLog
     }
 
     public static class TACommon
-    {  
+    {
         private static string libName = "CSharp";
-        private static string libVersion = "1.2.0";
-        private static TALogging logType = TALogging.TALoggingLog;
+        private static string libVersion = "1.3.0-beta.1";
+        private static TALogging logType = TALogging.TALoggingNone;
 
         public static string LibName
         {
@@ -34,12 +35,13 @@ namespace ThinkingData.Analytics
         {
             get { return libVersion; }
         }
-        public static TALogging LogType {
+        public static TALogging LogType
+        {
             get { return logType; }
-            set { logType = value;  }
+            set { logType = value; }
         }
     }
-    
+
     public class HttpSender
     {
         private const int MaxFlushBatchSize = 20;
@@ -52,9 +54,9 @@ namespace ThinkingData.Analytics
         private readonly bool _throwException;
         private readonly List<Dictionary<string, object>> _messageList;
 
-        private readonly IsoDateTimeConverter _timeConverter = new IsoDateTimeConverter {  DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff"};
+        private readonly IsoDateTimeConverter _timeConverter = new IsoDateTimeConverter { DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff" };
 
-       
+
         static bool isNetworking = false;
         static Mutex ta_networking_mutex = new Mutex();
 
@@ -85,7 +87,8 @@ namespace ThinkingData.Analytics
         }
 
 
-        public async Task<bool> _Flush() {
+        public async Task<bool> _Flush()
+        {
 
             await Task.Run(async () =>
             {
@@ -93,7 +96,7 @@ namespace ThinkingData.Analytics
                 if (isNetworking)
                 {
                     ta_networking_mutex.ReleaseMutex();
-                    return ;
+                    return;
                 }
                 isNetworking = true;
                 ta_networking_mutex.ReleaseMutex();
@@ -160,8 +163,8 @@ namespace ThinkingData.Analytics
                     {
                         if (TACommon.LogType == TALogging.TALoggingLog)
                         {
-                            Console.WriteLine("[ThinkingEngine] flush success:");
-                            Console.WriteLine(sendingData);
+                            Console.WriteLine("[ThinkingData] Debug: Send event, Request = ");
+                            Console.WriteLine(sendingData);                         
                         }
 
                         try
@@ -195,7 +198,7 @@ namespace ThinkingData.Analytics
                 isNetworking = false;
                 ta_networking_mutex.ReleaseMutex();
             });
-            
+
             return true;
         }
 
@@ -228,6 +231,8 @@ namespace ThinkingData.Analytics
                 var response = await request.GetResponseAsync() as HttpWebResponse;
 
                 var responseString = new StreamReader(response.GetResponseStream()).ReadToEnd();
+
+                Console.WriteLine("[ThinkingData] Debug: Send event, Response = " + responseString);
 
                 if (response.StatusCode != HttpStatusCode.OK)
                 {
@@ -294,7 +299,7 @@ namespace ThinkingData.Analytics
                     throw new SystemException("[ThinkingEngine] Unexpected sendToServer error ");
                 }
             }
-            
+
             return sendSuccess;
         }
 
@@ -321,6 +326,8 @@ namespace ThinkingData.Analytics
         private string _distinctId;
         private readonly Dictionary<string, object> _pubicProperties;
         private readonly HttpSender _httpSender;
+        private static int systemTickCount;
+        private static long calibratedTime = 0;
 
         static Mutex _taIdMutex = new Mutex();
         static Mutex _taSuperPropertyMutex = new Mutex();
@@ -333,6 +340,11 @@ namespace ThinkingData.Analytics
         public static void setLoggingType(TALogging type)
         {
             TACommon.LogType = type;
+        }
+
+        public static void CalibrateTime(long timeStamp) {
+            calibratedTime = timeStamp;
+            systemTickCount = Environment.TickCount;
         }
 
         /**
@@ -348,12 +360,12 @@ namespace ThinkingData.Analytics
             // throw appid and url are null 
             if (string.IsNullOrEmpty(appid))
             {
-                throw new SystemException("[ThinkingEngine] The appid must be provided.");
+                throw new SystemException("[ThinkingData] Error: The appid must be provided.");
             }
 
             if (string.IsNullOrEmpty(url))
             {
-                throw new SystemException("[ThinkingEngine] The url must be provided.");
+                throw new SystemException("[ThinkingData] Error: The url must be provided.");
             }
 
             _appId = appid;
@@ -362,7 +374,7 @@ namespace ThinkingData.Analytics
             // get deviceid
             _taIdMutex.WaitOne();
             _deviceId = readIdentityId(filePathDeviceId());
-            if (string.IsNullOrEmpty(_deviceId) )
+            if (string.IsNullOrEmpty(_deviceId))
             {
                 _deviceId = Guid.NewGuid().ToString();
                 updateIdentityId(filePathDeviceId(), _deviceId);
@@ -392,14 +404,15 @@ namespace ThinkingData.Analytics
             // get superproperty
             _taSuperPropertyMutex.WaitOne();
             _pubicProperties = readSuperProperty(filePathSuperProperty());
-            if (_pubicProperties == null) {
+            if (_pubicProperties == null)
+            {
                 _pubicProperties = new Dictionary<string, object>();
             }
             _taSuperPropertyMutex.ReleaseMutex();
 
             if (TACommon.LogType == TALogging.TALoggingLog)
             {
-                Console.WriteLine("Thinking Analytics "+ TACommon.LibVersion + " "+ TACommon.LibName + " SDK initialized successfully." + "  app id:" + appid + ",  server url:" + url);
+                Console.WriteLine("[ThinkingData] Info: TDAnalytics SDK initialize success, AppId = " + appid + ", ServerUrl = " + url + ", Mode = Normal, DeviceId = " + _deviceId + ", Lib = " + TACommon.LibName + ", LibVersion = " + TACommon.LibVersion);
             }
         }
 
@@ -426,6 +439,14 @@ namespace ThinkingData.Analytics
             }
         }
 
+        public Dictionary<string, object> GetSuperProperties() {
+            Dictionary<string, object> superProperties;
+            _taSuperPropertyMutex.WaitOne();
+            superProperties = readSuperProperty(filePathSuperProperty());
+            _taSuperPropertyMutex.ReleaseMutex();
+            return superProperties;
+        }
+
         /**
            *  Clear all public event attributes.
            */
@@ -447,8 +468,20 @@ namespace ThinkingData.Analytics
             _taIdMutex.WaitOne();
             updateIdentityId(filePathDistinctId(), token);
             _distinctId = token;
+            if (TACommon.LogType == TALogging.TALoggingLog)
+            {
+                Console.WriteLine("[ThinkingData] Info: Setting distinct ID, DistinctId = " + token);
+            }
             _taIdMutex.ReleaseMutex();
 
+        }
+
+        public string GetDistinctId() {
+            string distinctId = "";
+            _taIdMutex.WaitOne();
+            distinctId = readIdentityId(filePathDistinctId());
+            _taIdMutex.ReleaseMutex();
+            return distinctId;
         }
 
         /**
@@ -461,6 +494,10 @@ namespace ThinkingData.Analytics
             _taIdMutex.WaitOne();
             updateIdentityId(filePathAccountId(), token);
             _accountId = token;
+            if (TACommon.LogType == TALogging.TALoggingLog)
+            {
+                Console.WriteLine("[ThinkingData] Info: Login SDK, AccountId = " + token);
+            }
             _taIdMutex.ReleaseMutex();
 
         }
@@ -473,6 +510,10 @@ namespace ThinkingData.Analytics
             _taIdMutex.WaitOne();
             updateIdentityId(filePathAccountId(), "");
             _accountId = "";
+            if (TACommon.LogType == TALogging.TALoggingLog)
+            {
+                Console.WriteLine("[ThinkingData] Info: Logout SDK");
+            }
             _taIdMutex.ReleaseMutex();
 
         }
@@ -490,7 +531,7 @@ namespace ThinkingData.Analytics
 
         private string filePathDeviceId()
         {
-            return Path.Combine(AppContext.BaseDirectory, "_ta_deviceid_" + _appId + ".txt"); 
+            return Path.Combine(AppContext.BaseDirectory, "_ta_deviceid_" + _appId + ".txt");
         }
 
 
@@ -510,10 +551,11 @@ namespace ThinkingData.Analytics
             return Path.Combine(AppContext.BaseDirectory, "_ta_superproperty_" + _appId + ".txt");
         }
 
-        
+
         private void updateIdentityId(string path, string identityId)
         {
-            try {
+            try
+            {
                 File.WriteAllText(path, identityId);
             }
             catch (Exception ex)
@@ -564,7 +606,7 @@ namespace ThinkingData.Analytics
 
         }
 
-        
+
         private Dictionary<string, object> readSuperProperty(string path)
         {
             Dictionary<string, object> superDic = new Dictionary<string, object>();
@@ -584,7 +626,7 @@ namespace ThinkingData.Analytics
             {
                 Console.WriteLine("[ThinkingEngine] File Read SuperProperty Error");
             }
-            
+
             return superDic;
         }
 
@@ -595,7 +637,7 @@ namespace ThinkingData.Analytics
          */
         public void Track(string event_name)
         {
-            _Add( "track", event_name, null, null, null);
+            _Add("track", event_name, null, null, null);
         }
 
         /**
@@ -610,7 +652,7 @@ namespace ThinkingData.Analytics
             {
                 throw new SystemException("[ThinkingEngine] The event name must be provided.");
             }
-            _Add( "track", event_name, null, null, properties);
+            _Add("track", event_name, null, null, properties);
         }
 
         /**
@@ -627,8 +669,8 @@ namespace ThinkingData.Analytics
             {
                 first_check_id = _deviceId;
             }
-            
-            _Add( "track", event_name, null, first_check_id, properties);
+
+            _Add("track", event_name, null, first_check_id, properties);
         }
 
         /**
@@ -655,7 +697,7 @@ namespace ThinkingData.Analytics
                 throw new SystemException("[ThinkingEngine] The event id must be provided.");
             }
 
-            _Add( "track_update", event_name, event_id, null, properties);
+            _Add("track_update", event_name, event_id, null, properties);
         }
 
         /**
@@ -683,7 +725,7 @@ namespace ThinkingData.Analytics
          */
         public void UserSet(Dictionary<string, object> properties)
         {
-            _Add( "user_set", properties);
+            _Add("user_set", properties);
         }
 
         /**
@@ -691,10 +733,10 @@ namespace ThinkingData.Analytics
           *
           * @param properties user properties
           */
-        public void UserUnSet( List<string> properties)
+        public void UserUnSet(List<string> properties)
         {
             var props = properties.ToDictionary<string, string, object>(property => property, property => 0);
-            _Add( "user_unset", props);
+            _Add("user_unset", props);
         }
 
         /**
@@ -704,7 +746,7 @@ namespace ThinkingData.Analytics
           */
         public void UserSetOnce(Dictionary<string, object> properties)
         {
-            _Add( "user_setOnce", properties);
+            _Add("user_setOnce", properties);
         }
 
         /**
@@ -713,7 +755,7 @@ namespace ThinkingData.Analytics
         public void UserSetOnce(string property, object value)
         {
             var properties = new Dictionary<string, object> { { property, value } };
-            _Add( "user_setOnce", properties);
+            _Add("user_setOnce", properties);
         }
 
         /**
@@ -723,7 +765,7 @@ namespace ThinkingData.Analytics
            */
         public void UserAdd(Dictionary<string, object> properties)
         {
-            _Add( "user_add", properties);
+            _Add("user_add", properties);
         }
 
         /**
@@ -733,7 +775,7 @@ namespace ThinkingData.Analytics
         public void UserAdd(string property, long value)
         {
             var properties = new Dictionary<string, object> { { property, value } };
-            _Add( "user_add", properties);
+            _Add("user_add", properties);
         }
 
         /**
@@ -743,7 +785,11 @@ namespace ThinkingData.Analytics
        */
         public void UserAppend(Dictionary<string, object> properties)
         {
-            _Add( "user_append", properties);
+            _Add("user_append", properties);
+        }
+
+        public void UserUniqAppend(Dictionary<string, object> properties) {
+            _Add("user_uniq_append", properties);
         }
 
         /**
@@ -751,7 +797,7 @@ namespace ThinkingData.Analytics
            */
         public void UserDelete()
         {
-            _Add( "user_del", new Dictionary<string, object>());
+            _Add("user_del", new Dictionary<string, object>());
         }
 
         /**
@@ -762,7 +808,7 @@ namespace ThinkingData.Analytics
         {
             _httpSender._Flush();
         }
-    
+
         private static bool IsNumber(object value)
         {
             return (value is sbyte) || (value is short) || (value is int) || (value is long) || (value is byte)
@@ -807,10 +853,10 @@ namespace ThinkingData.Analytics
 
         private void _Add(string type, IDictionary<string, object> properties)
         {
-            _Add( type, null, null, null, properties);
+            _Add(type, null, null, null, properties);
         }
 
-        private void _Add( string type, string event_name, string event_id,string first_check_id, IDictionary<string, object> properties)
+        private void _Add(string type, string event_name, string event_id, string first_check_id, IDictionary<string, object> properties)
         {
             var evt = new Dictionary<string, object>();
             if (!string.IsNullOrEmpty(_accountId))
@@ -822,11 +868,12 @@ namespace ThinkingData.Analytics
             {
                 evt.Add("#distinct_id", _distinctId);
             }
-            else {
+            else
+            {
                 evt.Add("#distinct_id", _deviceId);
             }
 
- 
+
             if (!string.IsNullOrEmpty(event_name))
             {
                 evt.Add("#event_name", event_name);
@@ -837,7 +884,7 @@ namespace ThinkingData.Analytics
                 if (type == "track_update" || type == "track_overwrite")
                 {
                     evt.Add("#event_id", event_id);
-                }   
+                }
             }
 
             if (!string.IsNullOrEmpty(first_check_id))
@@ -845,7 +892,19 @@ namespace ThinkingData.Analytics
                 evt.Add("#first_check_id", first_check_id);
             }
 
-            evt.Add("#time", DateTime.Now);
+            
+            if (calibratedTime == 0)
+            {
+                evt.Add("#time", DateTime.Now);
+            }
+            else {
+
+                long timestampInMilliseconds = calibratedTime + Environment.TickCount - systemTickCount;
+                DateTime dateTime = new DateTime(1970, 1, 1, 0, 0, 0, 0, System.DateTimeKind.Utc);
+                dateTime = dateTime.AddMilliseconds(timestampInMilliseconds).ToLocalTime();
+                evt.Add("#time", dateTime);
+            }
+
             evt.Add("#type", type);
             evt.Add("#uuid", Guid.NewGuid().ToString("D"));
 
@@ -862,20 +921,21 @@ namespace ThinkingData.Analytics
                 {
                     dynamicProperties = dynamicPropertyAction();
                 }
-               
+
                 if (dynamicProperties.Keys.Count != 0)
+                {
+                    foreach (var kvp in dynamicProperties)
                     {
-                        foreach (var kvp in dynamicProperties)
+                        if (!eventProperties.ContainsKey(kvp.Key))
                         {
-                            if (!eventProperties.ContainsKey(kvp.Key))
-                            {
-                                eventProperties.Add(kvp.Key, kvp.Value);
-                            }
+                            eventProperties.Add(kvp.Key, kvp.Value);
                         }
                     }
+                }
 
                 _taSuperPropertyMutex.WaitOne();
-                if (_pubicProperties != null) {
+                if (_pubicProperties != null)
+                {
                     foreach (var kvp in _pubicProperties)
                     {
                         if (!eventProperties.ContainsKey(kvp.Key))
@@ -889,22 +949,31 @@ namespace ThinkingData.Analytics
                 eventProperties.Add("#lib_version", TACommon.LibVersion);
                 eventProperties.Add("#lib", TACommon.LibName);
 
-                if (Environment.OSVersion.Platform == System.PlatformID.Win32Windows) {
+                if (Environment.OSVersion.Platform == System.PlatformID.Win32Windows)
+                {
                     eventProperties.Add("#os", "Windows");
-                } else if (Environment.OSVersion.Platform == System.PlatformID.Win32S) {
+                }
+                else if (Environment.OSVersion.Platform == System.PlatformID.Win32S)
+                {
                     eventProperties.Add("#os", "Windows");
-                } else if (Environment.OSVersion.Platform == System.PlatformID.Win32NT) {
+                }
+                else if (Environment.OSVersion.Platform == System.PlatformID.Win32NT)
+                {
                     eventProperties.Add("#os", "Windows");
-                } else if (Environment.OSVersion.Platform == System.PlatformID.WinCE){
+                }
+                else if (Environment.OSVersion.Platform == System.PlatformID.WinCE)
+                {
                     eventProperties.Add("#os", "Windows");
-                } else if (Environment.OSVersion.Platform == System.PlatformID.MacOSX){
+                }
+                else if (Environment.OSVersion.Platform == System.PlatformID.MacOSX)
+                {
                     eventProperties.Add("#os", "Mac");
                 }
                 eventProperties.Add("#device_id", _deviceId);
             }
 
             AssertProperties(type, eventProperties);
-            
+
             evt.Add("properties", eventProperties);
 
             if (TACommon.LogType == TALogging.TALoggingLog)
@@ -913,12 +982,304 @@ namespace ThinkingData.Analytics
                 {
                     DateTimeFormat = "yyyy-MM-dd HH:mm:ss.fff"
                 };
-                Console.WriteLine("[ThinkingEngine] data queue:");
+                Console.WriteLine("[ThinkingData] Info: Enqueue data,");
                 Console.WriteLine(JsonConvert.SerializeObject(evt, _timeConverter));
             }
 
             _httpSender.Send(evt);
         }
+    }
+
+    public class TDEventModel
+    {
+        public string eventName;
+        public Dictionary<string, object> properties;
+        public TDEventModel(string eventName, Dictionary<string, object> properties)
+        {
+            this.eventName = eventName;
+            this.properties = properties;
+        }
+    }
+
+    public class TDFirstEventModel : TDEventModel
+    {
+        public string firstCheckId;
+        public TDFirstEventModel(string eventName, Dictionary<string, object> properties, string firstCheckId = "") : base(eventName, properties)
+        {
+            this.firstCheckId = firstCheckId;
+        }
+    }
+
+    public class TDUpdatableEventModel : TDEventModel
+    {
+        public string eventId;
+        public TDUpdatableEventModel(string eventName, Dictionary<string, object> properties,string eventId) : base(eventName, properties)
+        {
+            this.eventId = eventId;
+        }
+    }
+
+    public class TDOverwritableEventModel : TDEventModel
+    {
+        public string eventId;
+        public TDOverwritableEventModel(string eventName, Dictionary<string, object> properties, string eventId) : base(eventName, properties)
+        {
+            this.eventId = eventId;
+        }
+    }
+
+    /// <summary>
+    /// The packaging class of ThinkingAnalyticsSDK provides static methods, which is more convenient for customers to use
+    /// </summary>
+    public class TDAnalytics
+    {
+        private static ThinkingdataAnalytics _instance;
+
+        /// <summary>
+        /// time calibration with timestamp
+        /// </summary>
+        /// <param name="timeStamp">timestamp</param>
+        public static void CalibrateTime(long timeStamp) {
+            ThinkingdataAnalytics.CalibrateTime(timeStamp);
+        }
+
+        /// <summary>
+        /// Initialize the SDK. The track function is not available until this interface is invoked.
+        /// </summary>
+        /// <param name="appId">app id</param>
+        /// <param name="serverUrl">server url</param>
+        public static void Init(string appId, string serverUrl)
+        {
+            if (_instance == null)
+            {
+                _instance = new ThinkingdataAnalytics(appId, serverUrl);
+            }
+        }
+
+        /// <summary>
+        /// Upload a single event, containing only preset properties and set public properties.
+        /// </summary>
+        /// <param name="eventName">event name</param>
+        /// <param name="properties">event properties</param>
+        public static void Track(string eventName, Dictionary<string, object> properties = null)
+        {
+            if (_instance == null) return;
+            if (properties == null) {
+                properties = new Dictionary<string, object>();
+            }
+            _instance.Track(eventName, properties);
+        }
+
+        /// <summary>
+        /// Upload a special type of event.
+        /// </summary>
+        /// <param name="model">Event Object TDFirstEventModel / TDOverWritableEventModel / TDUpdatableEventModel</param>
+        public static void Track(TDEventModel model) {
+            if (_instance == null) return;
+            if (model is TDFirstEventModel firstEventModel)
+            {
+                _instance.TrackFirst(firstEventModel.eventName, firstEventModel.firstCheckId, firstEventModel.properties);
+            }
+            else if (model is TDUpdatableEventModel updatableEventModel)
+            {
+                _instance.TrackUpdate(updatableEventModel.eventName, updatableEventModel.eventId, updatableEventModel.properties);
+
+            }
+            else if (model is TDOverwritableEventModel overwritableEventModel) {
+                _instance.TrackOverwrite(overwritableEventModel.eventName, overwritableEventModel.eventId, overwritableEventModel.properties);
+            }
+        }
+
+        /// <summary>
+        /// Sets the user property, replacing the original value with the new value if the property already exists.
+        /// </summary>
+        /// <param name="properties">user property</param>
+        public static void UserSet(Dictionary<string, object> properties)
+        {
+            if (_instance == null) return;
+            _instance.UserSet(properties);
+        }
+
+        /// <summary>
+        /// Sets a single user attribute, ignoring the new attribute value if the attribute already exists.
+        /// </summary>
+        /// <param name="properties">user property</param>
+        public static void UserSetOnce(Dictionary<string, object> properties)
+        {
+            if (_instance == null) return;
+            _instance.UserSetOnce(properties);
+        }
+
+        /// <summary>
+        /// Reset user properties.
+        /// </summary>
+        /// <param name="property">user property</param>
+        public static void UserUnset(string property)
+        {
+            List<string> list = new List<string>() {
+                property
+            };
+            _instance?.UserUnSet(list);
+        }
+
+        /// <summary>
+        /// Reset user properties.
+        /// </summary>
+        /// <param name="properties">list of user property</param>
+        public static void UserUnset(List<string> properties)
+        {
+            if (properties == null) return;
+            _instance.UserUnSet(properties);
+        }
+
+        /// <summary>
+        /// Only one attribute is set when the user attributes of a numeric type are added.
+        /// </summary>
+        /// <param name="properties">user property</param>
+        public static void UserAdd(Dictionary<string, object> properties)
+        {
+            if (_instance == null) return;
+            _instance.UserAdd(properties);
+        }
+
+        /// <summary>
+        /// Append a user attribute of the List type.
+        /// </summary>
+        /// <param name="properties">user property</param>
+        public static void UserAppend(Dictionary<string, object> properties)
+        {
+            if (_instance == null) return;
+            _instance.UserAppend(properties);
+        }
+
+        /// <summary>
+        /// The element appended to the library needs to be done to remove the processing, remove the support, and then import.
+        /// </summary>
+        /// <param name="properties">user property</param>
+        public static void UserUniqAppend(Dictionary<string, object> properties) {
+            if (_instance == null) return;
+            _instance.UserUniqAppend(properties);
+        }
+
+        /// <summary>
+        /// Delete the user attributes, but retain the uploaded event data. This operation is not reversible and should be performed with caution.
+        /// </summary>
+        public static void UserDelete()
+        {
+            if (_instance == null) return;
+            _instance.UserDelete();
+        }
+
+        /// <summary>
+        /// Set the public event attribute, which will be included in every event uploaded after that. The public event properties are saved without setting them each time.
+        /// </summary>
+        /// <param name="properties">super properties</param>
+        public static void SetSuperProperties(Dictionary<string, object> properties)
+        {
+            if (_instance == null) return;
+            _instance.SetPublicProperties(properties);
+        }
+
+        /// <summary>
+        /// Gets the public event properties that have been set.
+        /// </summary>
+        /// <returns>public event properties that have been set</returns>
+        public static Dictionary<string, object> GetSuperProperties() {
+            Dictionary<string, object> properties = new Dictionary<string, object>();
+            if (_instance != null) {
+                properties = _instance.GetSuperProperties();
+            }
+            return properties;
+        }
+
+        /// <summary>
+        /// Clear all public event attributes.
+        /// </summary>
+        public static void ClearSuperProperties()
+        {
+            if (_instance == null) return;
+            _instance.ClearPublicProperties();
+        }
+
+        /// <summary>
+        /// Set the account ID. Each setting overrides the previous value. Login events will not be uploaded.
+        /// </summary>
+        /// <param name="account"></param>
+        public static void Login(string account)
+        {
+            if (_instance == null) return;
+            _instance.Login(account);
+        }
+
+        /// <summary>
+        /// Clearing the account ID will not upload user logout events.
+        /// </summary>
+        public static void Logout()
+        {
+            if (_instance == null) return;
+            _instance.Logout();
+        }
+
+        /// <summary>
+        /// Set the distinct ID to replace the default UUID distinct ID.
+        /// </summary>
+        /// <param name="distinctId">distinct id</param>
+        public static void SetDistinctId(string distinctId)
+        {
+            if (_instance == null) return;
+            _instance.SetIdentity(distinctId);
+        }
+
+        /// <summary>
+        /// Obtain the device ID.
+        /// </summary>
+        /// <returns>device ID</returns>
+        public static string GetDeviceId()
+        {
+            if (_instance == null)
+            {
+                return "";
+            }
+            return _instance.GetDeviceId();
+        }
+
+        /// <summary>
+        /// Get a visitor ID: The #distinct_id value in the reported data.
+        /// </summary>
+        /// <returns>distinct ID</returns>
+        public static string GetDistinctId() {
+            if (_instance == null)
+            {
+                return "";
+            }
+            return _instance.GetDistinctId();
+        }
+
+        /// <summary>
+        /// Empty the cache queue. When this function is called, the data in the current cache queue will attempt to be reported.
+        /// </summary>
+        public static void Flush()
+        {
+            if (_instance == null) return;
+            _instance.Flush();
+        }
+
+        /// <summary>
+        /// enable debug logging
+        /// </summary>
+        /// <param name="enable">log switch</param>
+        public static void EnableLog(bool enable)
+        {
+            if (enable)
+            {
+                ThinkingdataAnalytics.setLoggingType(TALogging.TALoggingLog);
+            }
+            else
+            {
+                ThinkingdataAnalytics.setLoggingType(TALogging.TALoggingNone);
+            }
+        }
+
     }
 }
 
