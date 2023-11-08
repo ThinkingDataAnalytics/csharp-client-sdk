@@ -24,7 +24,7 @@ namespace ThinkingData.Analytics
     public static class TACommon
     {
         private static string libName = "CSharp";
-        private static string libVersion = "1.3.0-beta.1";
+        private static string libVersion = "1.3.0";
         private static TALogging logType = TALogging.TALoggingNone;
 
         public static string LibName
