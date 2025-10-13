@@ -13,7 +13,7 @@ namespace ThinkingData.Analytics
     public class TDAnalytics
     {
         const string LIB_NAME = "CSharp";
-        const string LIB_VERSION = "2.0.0";
+        const string LIB_VERSION = "2.0.1";
 
         [DllImport("libCppWrapper", EntryPoint = "InitWrapper", CallingConvention = CallingConvention.Cdecl)]
         private static extern bool InitWrapper(string appId, string serverUrl, bool enableEncrypt, int version, string publicKey, int mode, int databaseLimit, int dataExpression, string databasePath, string zoneOffset, bool enableAutoCalibrated);
